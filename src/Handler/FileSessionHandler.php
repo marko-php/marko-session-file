@@ -7,6 +7,7 @@ namespace Marko\Session\File\Handler;
 use Marko\Session\Config\SessionConfig;
 use Marko\Session\Contracts\SessionHandlerInterface;
 use Marko\Session\File\Exceptions\SessionWriteException;
+use Psr\Clock\ClockInterface;
 
 readonly class FileSessionHandler implements SessionHandlerInterface
 {
@@ -14,6 +15,7 @@ readonly class FileSessionHandler implements SessionHandlerInterface
 
     public function __construct(
         SessionConfig $config,
+        private ClockInterface $clock,
     ) {
         $path = $config->path();
 
@@ -118,7 +120,7 @@ readonly class FileSessionHandler implements SessionHandlerInterface
         int $max_lifetime,
     ): int|false {
         $count = 0;
-        $expireTime = time() - $max_lifetime;
+        $expireTime = $this->clock->now()->getTimestamp() - $max_lifetime;
 
         $files = glob($this->path . '/sess_*');
 

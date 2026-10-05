@@ -5,6 +5,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.5",
+        "marko/clock": "self.version",
         "marko/session": "self.version"
     },
     "require-dev": {

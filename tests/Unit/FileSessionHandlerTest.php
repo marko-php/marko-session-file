@@ -6,6 +6,7 @@ use Marko\Session\Config\SessionConfig;
 use Marko\Session\Contracts\SessionHandlerInterface;
 use Marko\Session\File\Exceptions\SessionWriteException;
 use Marko\Session\File\Handler\FileSessionHandler;
+use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
 
 /**
@@ -183,7 +184,8 @@ function createSessionConfig(
 
 beforeEach(function (): void {
     $this->sessionPath = getSessionTestPath();
-    $this->handler = new FileSessionHandler(createSessionConfig($this->sessionPath));
+    $this->clock = new FakeClock('2026-01-01 12:00:00 UTC');
+    $this->handler = new FileSessionHandler(createSessionConfig($this->sessionPath), $this->clock);
 });
 
 afterEach(function (): void {
@@ -254,7 +256,7 @@ it('garbage collects expired sessions', function (): void {
     $sessionFile = $this->sessionPath . '/sess_old-session';
 
     // Set modification time to past
-    touch($sessionFile, time() - 3700);
+    touch($sessionFile, $this->clock->now()->getTimestamp() - 3700);
 
     $count = $this->handler->gc(3600);
 
@@ -271,6 +273,36 @@ it('does not garbage collect active sessions', function (): void {
 
     expect($count)->toBe(0)
         ->and(file_exists($this->sessionPath . '/sess_active-session'))->toBeTrue();
+});
+
+it('garbage collects only files older than max lifetime relative to the clock', function (): void {
+    $this->handler->open($this->sessionPath, 'PHPSESSID');
+    $this->handler->write('aging-session', 'data');
+    $sessionFile = $this->sessionPath . '/sess_aging-session';
+    touch($sessionFile, $this->clock->now()->getTimestamp() - 100);
+
+    $countBefore = $this->handler->gc(3600);
+    $this->clock->travel('+1 hour');
+    $countAfter = $this->handler->gc(3600);
+
+    expect($countBefore)->toBe(0)
+        ->and($countAfter)->toBe(1)
+        ->and(file_exists($sessionFile))->toBeFalse();
+});
+
+it('keeps files exactly at the max lifetime boundary', function (): void {
+    $this->handler->open($this->sessionPath, 'PHPSESSID');
+    $this->handler->write('boundary-session', 'data');
+    $this->handler->write('expired-session', 'data');
+    $now = $this->clock->now()->getTimestamp();
+    touch($this->sessionPath . '/sess_boundary-session', $now - 3600);
+    touch($this->sessionPath . '/sess_expired-session', $now - 3601);
+
+    $count = $this->handler->gc(3600);
+
+    expect($count)->toBe(1)
+        ->and(file_exists($this->sessionPath . '/sess_boundary-session'))->toBeTrue()
+        ->and(file_exists($this->sessionPath . '/sess_expired-session'))->toBeFalse();
 });
 
 it('handles concurrent reads', function (): void {
@@ -314,7 +346,7 @@ it('throws SessionWriteException when fwrite does not write all bytes', function
     stream_wrapper_register('partial-write', PartialWriteStream::class);
 
     try {
-        $handler = new FileSessionHandler(createSessionConfig('partial-write://session-dir'));
+        $handler = new FileSessionHandler(createSessionConfig('partial-write://session-dir'), new FakeClock());
         expect(fn () => $handler->write('test-id', 'some-data'))
             ->toThrow(SessionWriteException::class);
     } finally {
@@ -328,7 +360,7 @@ it('throws SessionWriteException when ftruncate fails', function (): void {
     stream_wrapper_register('fail-truncate', FailTruncateStream::class);
 
     try {
-        $handler = new FileSessionHandler(createSessionConfig('fail-truncate://session-dir'));
+        $handler = new FileSessionHandler(createSessionConfig('fail-truncate://session-dir'), new FakeClock());
         expect(fn () => $handler->write('test-id', 'some-data'))
             ->toThrow(SessionWriteException::class);
     } finally {
