@@ -2,8 +2,10 @@
 
 declare(strict_types=1);
 
+use Marko\Core\Path\ProjectPaths;
 use Marko\Session\Config\SessionConfig;
 use Marko\Session\Contracts\SessionHandlerInterface;
+use Marko\Session\File\Exceptions\InsecureSessionPathException;
 use Marko\Session\File\Exceptions\SessionWriteException;
 use Marko\Session\File\Handler\FileSessionHandler;
 use Marko\Testing\Fake\FakeClock;
@@ -186,7 +188,11 @@ function createSessionConfig(
 beforeEach(function (): void {
     $this->sessionPath = getSessionTestPath();
     $this->clock = new FakeClock('2026-01-01 12:00:00 UTC');
-    $this->handler = new FileSessionHandler(createSessionConfig($this->sessionPath), $this->clock);
+    $this->handler = new FileSessionHandler(
+        createSessionConfig($this->sessionPath),
+        $this->clock,
+        new ProjectPaths(sys_get_temp_dir()),
+    );
 });
 
 afterEach(function (): void {
@@ -347,7 +353,11 @@ it('throws SessionWriteException when fwrite does not write all bytes', function
     stream_wrapper_register('partial-write', PartialWriteStream::class);
 
     try {
-        $handler = new FileSessionHandler(createSessionConfig('partial-write://session-dir'), new FakeClock());
+        $handler = new FileSessionHandler(
+            createSessionConfig('partial-write://session-dir'),
+            new FakeClock(),
+            new ProjectPaths(sys_get_temp_dir()),
+        );
         expect(fn () => $handler->write('test-id', 'some-data'))
             ->toThrow(SessionWriteException::class);
     } finally {
@@ -361,7 +371,11 @@ it('throws SessionWriteException when ftruncate fails', function (): void {
     stream_wrapper_register('fail-truncate', FailTruncateStream::class);
 
     try {
-        $handler = new FileSessionHandler(createSessionConfig('fail-truncate://session-dir'), new FakeClock());
+        $handler = new FileSessionHandler(
+            createSessionConfig('fail-truncate://session-dir'),
+            new FakeClock(),
+            new ProjectPaths(sys_get_temp_dir()),
+        );
         expect(fn () => $handler->write('test-id', 'some-data'))
             ->toThrow(SessionWriteException::class);
     } finally {
@@ -491,5 +505,109 @@ describe('strict session ids', function (): void {
         $this->handler->updateTimestamp('never-issued', '');
 
         expect(file_exists($this->sessionPath . '/sess_never-issued'))->toBeFalse();
+    });
+});
+
+describe('session path resolution', function (): void {
+    beforeEach(function (): void {
+        $this->projectBase = getSessionTestPath();
+        mkdir($this->projectBase . '/public', 0755, true);
+        $this->originalCwd = getcwd();
+    });
+
+    afterEach(function (): void {
+        chdir($this->originalCwd);
+        exec('rm -rf ' . escapeshellarg($this->projectBase));
+    });
+
+    it('resolves a relative path against the project base instead of the working directory', function (): void {
+        // FPM, CGI and mod_php chdir into public/ before running the front controller.
+        chdir($this->projectBase . '/public');
+
+        $handler = new FileSessionHandler(
+            createSessionConfig('storage/sessions'),
+            new FakeClock(),
+            new ProjectPaths($this->projectBase),
+        );
+        $handler->open('', 'PHPSESSID');
+        $handler->write('resolved-session', 'data');
+
+        expect(is_file($this->projectBase . '/storage/sessions/sess_resolved-session'))->toBeTrue()
+            ->and(is_dir($this->projectBase . '/public/storage'))->toBeFalse();
+    });
+
+    it('leaves an absolute path untouched', function (): void {
+        $absolute = $this->projectBase . '/elsewhere/sessions';
+
+        $handler = new FileSessionHandler(
+            createSessionConfig($absolute),
+            new FakeClock(),
+            new ProjectPaths('/some/other/base'),
+        );
+        $handler->open('', 'PHPSESSID');
+        $handler->write('absolute-session', 'data');
+
+        expect(is_file($absolute . '/sess_absolute-session'))->toBeTrue();
+    });
+
+    it('refuses a relative path that resolves inside the public directory', function (): void {
+        new FileSessionHandler(
+            createSessionConfig('public/storage/sessions'),
+            new FakeClock(),
+            new ProjectPaths($this->projectBase),
+        );
+    })->throws(InsecureSessionPathException::class);
+
+    it('refuses an absolute path inside the public directory', function (): void {
+        new FileSessionHandler(
+            createSessionConfig($this->projectBase . '/public/sessions'),
+            new FakeClock(),
+            new ProjectPaths($this->projectBase),
+        );
+    })->throws(InsecureSessionPathException::class);
+
+    it('refuses the public directory itself', function (): void {
+        new FileSessionHandler(
+            createSessionConfig('public'),
+            new FakeClock(),
+            new ProjectPaths($this->projectBase),
+        );
+    })->throws(InsecureSessionPathException::class);
+
+    it('refuses a path that reaches the public directory through dot segments', function (): void {
+        new FileSessionHandler(
+            createSessionConfig('storage/../public/./sessions'),
+            new FakeClock(),
+            new ProjectPaths($this->projectBase),
+        );
+    })->throws(InsecureSessionPathException::class);
+
+    it('allows a sibling directory whose name merely starts with public', function (): void {
+        $handler = new FileSessionHandler(
+            createSessionConfig('public-sessions'),
+            new FakeClock(),
+            new ProjectPaths($this->projectBase),
+        );
+        $handler->open('', 'PHPSESSID');
+
+        expect(is_dir($this->projectBase . '/public-sessions'))->toBeTrue();
+    });
+
+    it('explains which path was refused and how to fix it', function (): void {
+        try {
+            new FileSessionHandler(
+                createSessionConfig('public/storage/sessions'),
+                new FakeClock(),
+                new ProjectPaths($this->projectBase),
+            );
+        } catch (InsecureSessionPathException $e) {
+            expect($e->getMessage())->toContain('public')
+                ->and($e->getContext())->toContain($this->projectBase . '/public/storage/sessions')
+                ->and($e->getSuggestion())->toContain('session.path');
+
+            return;
+        }
+
+        throw new RuntimeException('Expected InsecureSessionPathException');
     });
 });

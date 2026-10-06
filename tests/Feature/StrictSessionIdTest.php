@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Marko\Session\File\Tests\Feature;
 
+use Marko\Core\Path\ProjectPaths;
 use Marko\Routing\Http\Request;
 use Marko\Routing\Http\Response;
 use Marko\Session\Config\SessionConfig;
@@ -98,7 +99,9 @@ function strictFileSessionHarness(
         'session.gc_divisor' => 100,
     ]));
     $clock = new FakeClock();
-    $handler = new RecordingFileSessionHandler(new FileSessionHandler($config, $clock));
+    $handler = new RecordingFileSessionHandler(
+        new FileSessionHandler($config, $clock, new ProjectPaths(sys_get_temp_dir())),
+    );
     $session = new Session($handler, $config);
 
     return [

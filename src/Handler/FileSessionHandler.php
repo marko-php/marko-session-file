@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Marko\Session\File\Handler;
 
+use Marko\Core\Path\ProjectPaths;
 use Marko\Session\Config\SessionConfig;
 use Marko\Session\Contracts\SessionHandlerInterface;
+use Marko\Session\File\Exceptions\InsecureSessionPathException;
 use Marko\Session\File\Exceptions\SessionWriteException;
 use Psr\Clock\ClockInterface;
 
@@ -15,14 +17,33 @@ readonly class FileSessionHandler implements SessionHandlerInterface
 
     private string $path;
 
+    /**
+     * @throws InsecureSessionPathException
+     */
     public function __construct(
         private SessionConfig $config,
         private ClockInterface $clock,
+        ProjectPaths $paths,
     ) {
         $path = $config->path();
 
-        if (!str_starts_with($path, '/') && !str_contains($path, '://')) {
-            $path = getcwd() . '/' . $path;
+        if (str_contains($path, '://')) {
+            $this->path = $path;
+
+            return;
+        }
+
+        // Resolve against the project root, never getcwd(): FPM, CGI and
+        // mod_php chdir into public/ before running the front controller.
+        if (!str_starts_with($path, '/')) {
+            $path = $paths->base . '/' . $path;
+        }
+
+        $publicDirectory = $this->normalize($paths->base . '/public');
+        $normalized = $this->normalize($path);
+
+        if ($normalized === $publicDirectory || str_starts_with($normalized, $publicDirectory . '/')) {
+            throw InsecureSessionPathException::insidePublicDirectory($normalized, $publicDirectory);
         }
 
         $this->path = $path;
@@ -191,5 +212,31 @@ readonly class FileSessionHandler implements SessionHandlerInterface
         string $id,
     ): string {
         return $this->path . '/sess_' . $id;
+    }
+
+    /**
+     * Collapse "." and ".." segments and duplicate slashes lexically, so the
+     * public-directory check works before the session directory exists.
+     */
+    private function normalize(
+        string $path,
+    ): string {
+        $segments = [];
+
+        foreach (explode('/', $path) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+
+            if ($segment === '..') {
+                array_pop($segments);
+
+                continue;
+            }
+
+            $segments[] = $segment;
+        }
+
+        return '/' . implode('/', $segments);
     }
 }

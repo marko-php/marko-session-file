@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Marko\Clock\SystemClock;
+use Marko\Core\Path\ProjectPaths;
 use Marko\Routing\Http\Request;
 use Marko\Routing\Http\Response;
 use Marko\Session\Config\SessionConfig;
@@ -46,7 +47,7 @@ it('starts a session and sets a session cookie end-to-end with the file driver i
         ]);
 
         $sessionConfig = new SessionConfig($config);
-        $handler = new FileSessionHandler($sessionConfig, new SystemClock());
+        $handler = new FileSessionHandler($sessionConfig, new SystemClock(), new ProjectPaths(sys_get_temp_dir()));
         $session = new Session($handler, $sessionConfig);
         $middleware = new SessionMiddleware($session, $sessionConfig, new SystemClock());
 
