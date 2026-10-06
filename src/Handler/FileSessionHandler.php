@@ -11,10 +11,12 @@ use Psr\Clock\ClockInterface;
 
 readonly class FileSessionHandler implements SessionHandlerInterface
 {
+    private const int SECONDS_PER_MINUTE = 60;
+
     private string $path;
 
     public function __construct(
-        SessionConfig $config,
+        private SessionConfig $config,
         private ClockInterface $clock,
     ) {
         $path = $config->path();
@@ -101,7 +103,9 @@ readonly class FileSessionHandler implements SessionHandlerInterface
             fclose($handle);
         }
 
-        return true;
+        // Stamp the mtime with the injected clock so validateId(), gc() and
+        // updateTimestamp() all measure age against one time source.
+        return touch($path, $this->clock->now()->getTimestamp());
     }
 
     public function destroy(
@@ -139,6 +143,48 @@ readonly class FileSessionHandler implements SessionHandlerInterface
         }
 
         return $count;
+    }
+
+    /**
+     * A session is known when its file exists and was last touched within
+     * the configured lifetime, measured with the injected clock.
+     */
+    public function validateId(
+        string $id,
+    ): bool {
+        $path = $this->getPath($id);
+
+        // The stat cache survives across requests in a long-running worker;
+        // a stale entry could resurrect a file another process removed.
+        clearstatcache(true, $path);
+
+        if (!is_file($path)) {
+            return false;
+        }
+
+        $mtime = filemtime($path);
+        $expiresBefore = $this->clock->now()->getTimestamp() - $this->config->lifetime() * self::SECONDS_PER_MINUTE;
+
+        return $mtime !== false && $mtime >= $expiresBefore;
+    }
+
+    /**
+     * Slide the expiry of an existing session forward without rewriting its
+     * payload. A missing file is left missing: this never creates a session.
+     */
+    public function updateTimestamp(
+        string $id,
+        string $data,
+    ): bool {
+        $path = $this->getPath($id);
+
+        clearstatcache(true, $path);
+
+        if (!is_file($path)) {
+            return true;
+        }
+
+        return touch($path, $this->clock->now()->getTimestamp());
     }
 
     private function getPath(

@@ -177,6 +177,7 @@ function createSessionConfig(
 ): SessionConfig {
     $configRepo = new FakeConfigRepository([
         'session.path' => $path,
+        'session.lifetime' => 60,
     ]);
 
     return new SessionConfig($configRepo);
@@ -404,4 +405,91 @@ it('creates a session file with 0600 permissions after write', function (): void
     $file = $this->sessionPath . '/sess_perm-test';
 
     expect(fileperms($file) & 0777)->toBe(0600);
+});
+
+describe('strict session ids', function (): void {
+    it('validates an id whose session file exists within the lifetime', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+        $this->handler->write('live-session', 'data');
+        touch($this->sessionPath . '/sess_live-session', $this->clock->now()->getTimestamp() - 3600);
+
+        expect($this->handler->validateId('live-session'))->toBeTrue();
+    });
+
+    it('rejects an id with no session file', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+
+        expect($this->handler->validateId('never-issued'))->toBeFalse();
+    });
+
+    it('rejects an id whose session file is older than the lifetime', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+        $this->handler->write('stale-session', 'data');
+        touch($this->sessionPath . '/sess_stale-session', $this->clock->now()->getTimestamp() - 3601);
+
+        expect($this->handler->validateId('stale-session'))->toBeFalse();
+    });
+
+    it('rejects an id once the clock moves past the lifetime', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+        $this->handler->write('aging-session', 'data');
+        touch($this->sessionPath . '/sess_aging-session', $this->clock->now()->getTimestamp());
+
+        $before = $this->handler->validateId('aging-session');
+        $this->clock->travel('+61 minutes');
+
+        expect($before)->toBeTrue()
+            ->and($this->handler->validateId('aging-session'))->toBeFalse();
+    });
+
+    it('updates the session file timestamp without changing its payload', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+        $this->handler->write('touched-session', 'payload');
+        $file = $this->sessionPath . '/sess_touched-session';
+        touch($file, $this->clock->now()->getTimestamp() - 1800);
+
+        $result = $this->handler->updateTimestamp('touched-session', 'ignored-data');
+        clearstatcache(true, $file);
+
+        expect($result)->toBeTrue()
+            ->and(filemtime($file))->toBe($this->clock->now()->getTimestamp())
+            ->and(file_get_contents($file))->toBe('payload');
+    });
+
+    it('returns true when updating the timestamp of an id whose file no longer exists', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+
+        expect($this->handler->updateTimestamp('gone-session', ''))->toBeTrue();
+    });
+
+    it('stamps the session file mtime with the clock on write', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+
+        $this->handler->write('stamped-session', 'data');
+        $file = $this->sessionPath . '/sess_stamped-session';
+        clearstatcache(true, $file);
+
+        expect(filemtime($file))->toBe($this->clock->now()->getTimestamp());
+    });
+
+    it('sees a fresh mtime after the file changes within the same process', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+        $this->handler->write('restat-session', 'data');
+        $file = $this->sessionPath . '/sess_restat-session';
+        $before = $this->handler->validateId('restat-session');
+
+        // Age the file behind PHP's stat cache, as another worker process would.
+        exec('touch -t 200001010000 ' . escapeshellarg($file));
+
+        expect($before)->toBeTrue()
+            ->and($this->handler->validateId('restat-session'))->toBeFalse();
+    });
+
+    it('does not create a session file when updating the timestamp of an unknown id', function (): void {
+        $this->handler->open($this->sessionPath, 'PHPSESSID');
+
+        $this->handler->updateTimestamp('never-issued', '');
+
+        expect(file_exists($this->sessionPath . '/sess_never-issued'))->toBeFalse();
+    });
 });
